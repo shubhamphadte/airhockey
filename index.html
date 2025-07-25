@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Air Hockey</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Poppins', sans-serif;
+            touch-action: none; /* Prevents scrolling on touch devices */
+        }
+        .game-container {
+            width: 100%;
+            max-width: 500px;
+        }
+        canvas {
+            background-color: #0d8cff;
+            border: 8px solid #ffffff;
+            box-shadow: 0 10px 20px rgba(0,0,0,0.19), 0 6px 6px rgba(0,0,0,0.23);
+            cursor: none; /* Hide cursor over canvas */
+            border-radius: 1rem;
+        }
+        .score-board {
+            display: flex;
+            justify-content: space-around;
+            width: 100%;
+            max-width: 500px;
+            margin-bottom: 1rem;
+        }
+        .score {
+            font-size: 3rem;
+            font-weight: 700;
+            color: #333;
+        }
+        .player-label {
+            font-size: 1.2rem;
+            font-weight: 600;
+            color: #555;
+        }
+        .message-box {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background-color: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 20px 40px;
+            border-radius: 10px;
+            font-size: 2rem;
+            font-weight: 600;
+            z-index: 10;
+            text-align: center;
+            opacity: 0;
+            transition: opacity 0.5s;
+            pointer-events: none; /* Allows clicks to go through */
+        }
+        .message-box.visible {
+            opacity: 1;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 flex flex-col items-center justify-center min-h-screen p-4">
+
+    <h1 class="text-4xl font-bold text-gray-800 mb-4">Air Hockey</h1>
+
+    <div class="score-board">
+        <div class="text-center">
+            <div class="player-label text-blue-600">Player</div>
+            <div id="player-score" class="score text-blue-600">0</div>
+        </div>
+        <div class="text-center">
+            <div class="player-label text-red-600">Computer</div>
+            <div id="computer-score" class="score text-red-600">0</div>
+        </div>
+    </div>
+
+    <div class="game-container relative">
+        <canvas id="gameCanvas"></canvas>
+        <div id="messageBox" class="message-box"></div>
+    </div>
+
+    <button id="resetButton" class="mt-6 bg-indigo-600 text-white font-bold py-3 px-8 rounded-lg shadow-lg hover:bg-indigo-700 transition duration-300">
+        Reset Game
+    </button>
+
+    <script>
+        // --- Canvas and Context Setup ---
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const messageBox = document.getElementById('messageBox');
+        const playerScoreEl = document.getElementById('player-score');
+        const computerScoreEl = document.getElementById('computer-score');
+        const resetButton = document.getElementById('resetButton');
+
+        let animationFrameId;
+
+        // --- Game Constants ---
+        const PUCK_RADIUS = 15;
+        const MALLET_RADIUS = 25;
+        const GOAL_WIDTH = 150;
+        const FRICTION = 0.99;
+        const MAX_PUCK_SPEED = 18;
+        const COMPUTER_SPEED = 5; 
+
+        // --- Game State ---
+        let puck, playerMallet, computerMallet;
+        let playerScore = 0;
+        let computerScore = 0;
+        const WINNING_SCORE = 7;
+        let gamePaused = false;
+        let mouse = { x: 0, y: 0 }; // Object to store mouse/touch coordinates
+
+        // --- Utility Functions ---
+        function getDistance(x1, y1, x2, y2) {
+            return Math.sqrt(Math.pow(x2 - x1, 2) + Math.pow(y2 - y1, 2));
+        }
+
+        function showMessage(text, duration = 1500) {
+            messageBox.textContent = text;
+            messageBox.classList.add('visible');
+            gamePaused = true;
+            if (animationFrameId) {
+                cancelAnimationFrame(animationFrameId);
+            }
+            setTimeout(() => {
+                messageBox.classList.remove('visible');
+                gamePaused = false;
+                resetPositions();
+                animationFrameId = requestAnimationFrame(gameLoop);
+            }, duration);
+        }
+
+        // --- Game Object Classes ---
+        class Puck {
+            constructor(x, y, radius) {
+                this.x = x;
+                this.y = y;
+                this.vx = 0;
+                this.vy = 0;
+                this.radius = radius;
+                this.color = '#fff';
+            }
+
+            draw() {
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fillStyle = this.color;
+                ctx.fill();
+                ctx.strokeStyle = '#333';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+                ctx.closePath();
+            }
+
+            update() {
+                this.x += this.vx;
+                this.y += this.vy;
+                this.vx *= FRICTION;
+                this.vy *= FRICTION;
+
+                // FIX: Stop the puck if its velocity is negligible to prevent infinite wobble
+                if (Math.abs(this.vx) < 0.01) {
+                    this.vx = 0;
+                }
+                if (Math.abs(this.vy) < 0.01) {
+                    this.vy = 0;
+                }
+            }
+        }
+
+        class Mallet {
+            constructor(x, y, radius, color, innerColor) {
+                this.x = x;
+                this.y = y;
+                this.radius = radius;
+                this.color = color;
+                this.innerColor = innerColor;
+            }
+
+            draw() {
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fillStyle = this.color;
+                ctx.fill();
+                ctx.closePath();
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius * 0.8, 0, Math.PI * 2);
+                ctx.fillStyle = this.innerColor;
+                ctx.fill();
+                ctx.closePath();
+            }
+        }
+
+        // --- Game Initialization ---
+        function init() {
+            const container = document.querySelector('.game-container');
+            const containerWidth = container.clientWidth;
+            canvas.width = containerWidth;
+            canvas.height = containerWidth * 1.5;
+
+            puck = new Puck(canvas.width / 2, canvas.height / 2, PUCK_RADIUS);
+            playerMallet = new Mallet(canvas.width / 2, canvas.height - 60, MALLET_RADIUS, '#004C99', '#007BFF');
+            computerMallet = new Mallet(canvas.width / 2, 60, MALLET_RADIUS, '#990000', '#FF0000');
+            
+            // Set initial mouse position to player mallet's start
+            mouse.x = playerMallet.x;
+            mouse.y = playerMallet.y;
+
+            if (!gamePaused) {
+                playerScore = 0;
+                computerScore = 0;
+            }
+            updateScoreDisplay();
+
+            if (animationFrameId) cancelAnimationFrame(animationFrameId);
+            animationFrameId = requestAnimationFrame(gameLoop);
+        }
+
+        // --- Game Loop ---
+        function gameLoop() {
+            if (gamePaused) return;
+            update();
+            draw();
+            animationFrameId = requestAnimationFrame(gameLoop);
+        }
+        
+        // --- Update Logic ---
+        function update() {
+            movePlayerMallet(); // New smoothed movement
+            moveComputerMallet();
+            puck.update();
+            handleCollisions();
+            checkGoal();
+        }
+
+        // --- Drawing Logic ---
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            drawTable();
+            puck.draw();
+            playerMallet.draw();
+            computerMallet.draw();
+        }
+
+        function drawTable() {
+            const w = canvas.width;
+            const h = canvas.height;
+            const tableStrokeStyle = 'rgba(255, 255, 255, 0.5)';
+            const goalPostColor = 'white';
+            const goalPostWidth = 10;
+            const goalPostHeight = 20;
+            const goalLeft = (w - GOAL_WIDTH) / 2;
+            const goalRight = (w + GOAL_WIDTH) / 2;
+
+            ctx.strokeStyle = tableStrokeStyle;
+            ctx.lineWidth = 5;
+            ctx.beginPath();
+            ctx.moveTo(0, h / 2);
+            ctx.lineTo(w, h / 2);
+            ctx.stroke();
+
+            ctx.beginPath();
+            ctx.arc(w / 2, h / 2, 60, 0, Math.PI * 2);
+            ctx.stroke();
+            
+            ctx.beginPath();
+            ctx.arc(w / 2, 0, GOAL_WIDTH / 2 + 10, 0, Math.PI, false);
+            ctx.stroke();
+
+            ctx.beginPath();
+            ctx.arc(w / 2, h, GOAL_WIDTH / 2 + 10, Math.PI, 0, false);
+            ctx.stroke();
+
+            ctx.fillStyle = goalPostColor;
+            ctx.fillRect(goalLeft - goalPostWidth, 0, goalPostWidth, goalPostHeight);
+            ctx.fillRect(goalRight, 0, goalPostWidth, goalPostHeight);
+            ctx.fillRect(goalLeft - goalPostWidth, h - goalPostHeight, goalPostWidth, goalPostHeight);
+            ctx.fillRect(goalRight, h - goalPostHeight, goalPostWidth, goalPostHeight);
+        }
+
+        // --- AI and Movement ---
+        function moveComputerMallet() {
+            let targetX = puck.x;
+            const safeZone = MALLET_RADIUS + 10;
+            targetX = Math.max(safeZone, Math.min(canvas.width - safeZone, targetX));
+            let targetY;
+            if (puck.y < canvas.height / 2 + 50) {
+                targetY = puck.y - PUCK_RADIUS;
+            } else {
+                targetY = 60;
+            }
+            const dx = targetX - computerMallet.x;
+            const dy = targetY - computerMallet.y;
+            const dist = getDistance(targetX, targetY, computerMallet.x, computerMallet.y);
+            if (dist > 1) {
+                computerMallet.x += (dx / dist) * COMPUTER_SPEED;
+                computerMallet.y += (dy / dist) * COMPUTER_SPEED;
+            }
+            if (computerMallet.y > canvas.height / 2 - MALLET_RADIUS) computerMallet.y = canvas.height / 2 - MALLET_RADIUS;
+            if (computerMallet.y < MALLET_RADIUS) computerMallet.y = MALLET_RADIUS;
+            if (computerMallet.x < MALLET_RADIUS) computerMallet.x = MALLET_RADIUS;
+            if (computerMallet.x > canvas.width - MALLET_RADIUS) computerMallet.x = canvas.width - MALLET_RADIUS;
+        }
+        
+        // FIX: Smooth player movement
+        function movePlayerMallet() {
+            // Smoothly interpolate the mallet's position towards the mouse coordinates
+            const smoothingFactor = 0.2;
+            let dx = mouse.x - playerMallet.x;
+            let dy = mouse.y - playerMallet.y;
+            
+            playerMallet.x += dx * smoothingFactor;
+            playerMallet.y += dy * smoothingFactor;
+
+            // Keep player mallet in their half
+            if (playerMallet.y < canvas.height / 2 + MALLET_RADIUS) {
+                playerMallet.y = canvas.height / 2 + MALLET_RADIUS;
+            }
+            if (playerMallet.y > canvas.height - MALLET_RADIUS) {
+                playerMallet.y = canvas.height - MALLET_RADIUS;
+            }
+            if (playerMallet.x < MALLET_RADIUS) {
+                playerMallet.x = MALLET_RADIUS;
+            }
+            if (playerMallet.x > canvas.width - MALLET_RADIUS) {
+                playerMallet.x = canvas.width - MALLET_RADIUS;
+            }
+        }
+
+        function handleCursorMove(e) {
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+            
+            // Just update the mouse object, don't move the mallet directly
+            mouse.x = (e.clientX - rect.left) * scaleX;
+            mouse.y = (e.clientY - rect.top) * scaleY;
+        }
+
+        // --- Collision and Physics ---
+        function handleCollisions() {
+            if (puck.x + puck.radius > canvas.width) {
+                puck.vx *= -1;
+                puck.x = canvas.width - puck.radius;
+            }
+            if (puck.x - puck.radius < 0) {
+                puck.vx *= -1;
+                puck.x = puck.radius;
+            }
+            const goalLeft = (canvas.width - GOAL_WIDTH) / 2;
+            const goalRight = (canvas.width + GOAL_WIDTH) / 2;
+            if (puck.y - puck.radius < 0 && (puck.x < goalLeft || puck.x > goalRight)) {
+                puck.vy *= -1;
+                puck.y = puck.radius;
+            }
+            if (puck.y + puck.radius > canvas.height && (puck.x < goalLeft || puck.x > goalRight)) {
+                puck.vy *= -1;
+                puck.y = canvas.height - puck.radius;
+            }
+            handleMalletPuckCollision(playerMallet);
+            handleMalletPuckCollision(computerMallet);
+            const speed = Math.sqrt(puck.vx * puck.vx + puck.vy * puck.vy);
+            if (speed > MAX_PUCK_SPEED) {
+                puck.vx = (puck.vx / speed) * MAX_PUCK_SPEED;
+                puck.vy = (puck.vy / speed) * MAX_PUCK_SPEED;
+            }
+        }
+
+        function handleMalletPuckCollision(mallet) {
+            const dist = getDistance(puck.x, puck.y, mallet.x, mallet.y);
+            if (dist < puck.radius + mallet.radius) {
+                const angle = Math.atan2(puck.y - mallet.y, puck.x - mallet.x);
+                puck.vx = Math.cos(angle) * MAX_PUCK_SPEED;
+                puck.vy = Math.sin(angle) * MAX_PUCK_SPEED;
+                const overlap = puck.radius + mallet.radius - dist;
+                puck.x += Math.cos(angle) * overlap;
+                puck.y += Math.sin(angle) * overlap;
+            }
+        }
+
+        // --- Scoring Logic ---
+        function checkGoal() {
+            if (gamePaused) return;
+            const goalLeft = (canvas.width - GOAL_WIDTH) / 2;
+            const goalRight = (canvas.width + GOAL_WIDTH) / 2;
+            if (puck.y + puck.radius >= canvas.height && puck.x > goalLeft && puck.x < goalRight) {
+                computerScore++;
+                updateScoreDisplay();
+                if (computerScore >= WINNING_SCORE) {
+                    endGame("Computer Wins!");
+                } else {
+                    showMessage("Computer Scores!");
+                }
+            }
+            if (puck.y - puck.radius <= 0 && puck.x > goalLeft && puck.x < goalRight) {
+                playerScore++;
+                updateScoreDisplay();
+                if (playerScore >= WINNING_SCORE) {
+                    endGame("You Win!");
+                } else {
+                    showMessage("You Score!");
+                }
+            }
+        }
+
+        function updateScoreDisplay() {
+            playerScoreEl.textContent = playerScore;
+            computerScoreEl.textContent = computerScore;
+        }
+
+        function resetPositions() {
+            puck.x = canvas.width / 2;
+            puck.y = canvas.height / 2;
+            puck.vx = 0;
+            puck.vy = 0;
+            playerMallet.x = canvas.width / 2;
+            playerMallet.y = canvas.height - 60;
+            computerMallet.x = canvas.width / 2;
+            computerMallet.y = 60;
+        }
+        
+        function resetGame() {
+            gamePaused = false;
+            if (animationFrameId) cancelAnimationFrame(animationFrameId);
+            init();
+        }
+
+        function endGame(message) {
+            gamePaused = true;
+            if (animationFrameId) cancelAnimationFrame(animationFrameId);
+            messageBox.textContent = message;
+            messageBox.classList.add('visible');
+        }
+        
+        // --- Event Listeners ---
+        canvas.addEventListener('mousemove', handleCursorMove);
+        canvas.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            if (e.touches[0]) handleCursorMove(e.touches[0]);
+        });
+        resetButton.addEventListener('click', resetGame);
+        window.addEventListener('resize', resetGame);
+
+        // --- Start the game ---
+        init();
+    </script>
+</body>
+</html>
